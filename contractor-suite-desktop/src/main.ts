@@ -1,0 +1,1 @@
+window.location.href = 'https://contractor-suite-admin-live.vercel.app'

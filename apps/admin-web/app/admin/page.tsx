@@ -124,6 +124,7 @@ const sectionCardStyle: React.CSSProperties = {
 export default function AdminDashboardPage() {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
+  const [pageError, setPageError] = useState<string | null>(null)
 
   const [companyProfile, setCompanyProfile] = useState<CompanyProfile | null>(null)
 
@@ -167,13 +168,13 @@ export default function AdminDashboardPage() {
 
   const loadAllData = async () => {
     const [
-      { data: jobsData },
-      { data: photosData },
-      { data: profilesData },
-      { data: clientsData },
-      { data: presenceData },
-      { data: messagesData },
-      { data: companyData },
+      jobsRes,
+      photosRes,
+      profilesRes,
+      clientsRes,
+      presenceRes,
+      messagesRes,
+      companyRes,
     ] = await Promise.all([
       supabase.from('jobs').select('*').order('created_at', { ascending: false }),
       supabase.from('job_photos').select('*'),
@@ -184,47 +185,70 @@ export default function AdminDashboardPage() {
       supabase.from('company_profile').select('*').maybeSingle(),
     ])
 
-    setJobs(jobsData || [])
-    setPhotos(photosData || [])
-    setProfiles(profilesData || [])
-    setClients(clientsData || [])
-    setPresence(presenceData || [])
-    setMessages(messagesData || [])
-    setCompanyProfile(companyData || null)
+    if (jobsRes.error) throw new Error(`Jobs: ${jobsRes.error.message}`)
+    if (photosRes.error) throw new Error(`Photos: ${photosRes.error.message}`)
+    if (profilesRes.error) throw new Error(`Profiles: ${profilesRes.error.message}`)
+    if (clientsRes.error) throw new Error(`Clients: ${clientsRes.error.message}`)
+    if (presenceRes.error) throw new Error(`Presence: ${presenceRes.error.message}`)
+    if (messagesRes.error) throw new Error(`Messages: ${messagesRes.error.message}`)
+    if (companyRes.error) throw new Error(`Company: ${companyRes.error.message}`)
+
+    setJobs(jobsRes.data || [])
+    setPhotos(photosRes.data || [])
+    setProfiles(profilesRes.data || [])
+    setClients(clientsRes.data || [])
+    setPresence(presenceRes.data || [])
+    setMessages(messagesRes.data || [])
+    setCompanyProfile(companyRes.data || null)
   }
 
   useEffect(() => {
     const init = async () => {
-      const { data } = await supabase.auth.getSession()
-      setSession(data.session)
+      try {
+        setPageError(null)
 
-      if (!data.session) {
-        window.location.href = '/admin/login'
-        return
+        const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+        if (sessionError) throw new Error(sessionError.message)
+
+        setSession(sessionData.session)
+
+        if (!sessionData.session) {
+          window.location.href = '/admin/login'
+          return
+        }
+
+        const { data: authData, error: authError } = await supabase.auth.getUser()
+        if (authError) throw new Error(authError.message)
+
+        const userId = authData.user?.id
+        if (!userId) {
+          window.location.href = '/admin/login'
+          return
+        }
+
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', userId)
+          .single()
+
+        if (profileError) throw new Error(profileError.message)
+
+        if (!profile || profile.role !== 'admin') {
+          await supabase.auth.signOut()
+          window.location.href = '/admin/login'
+          return
+        }
+
+        await loadAllData()
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to load admin dashboard.'
+        console.error('Admin init error:', err)
+        setPageError(message)
+      } finally {
+        setLoading(false)
       }
-
-      const { data: authData } = await supabase.auth.getUser()
-      const userId = authData.user?.id
-
-      if (!userId) {
-        window.location.href = '/admin/login'
-        return
-      }
-
-      const { data: profile, error } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', userId)
-        .single()
-
-      if (error || !profile || profile.role !== 'admin') {
-        await supabase.auth.signOut()
-        window.location.href = '/admin/login'
-        return
-      }
-
-      await loadAllData()
-      setLoading(false)
     }
 
     void init()
@@ -237,7 +261,14 @@ export default function AdminDashboardPage() {
         return
       }
 
-      await loadAllData()
+      try {
+        await loadAllData()
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to refresh admin dashboard.'
+        console.error('Admin auth refresh error:', err)
+        setPageError(message)
+      }
     })
 
     return () => data.subscription.unsubscribe()
@@ -246,32 +277,34 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     if (!session) return
 
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const triggerRefresh = () => {
+      if (timeout) clearTimeout(timeout)
+      timeout = setTimeout(async () => {
+        try {
+          await loadAllData()
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : 'Realtime refresh failed.'
+          console.error('Admin realtime error:', err)
+          setPageError(message)
+        }
+      }, 250)
+    }
+
     const channel = supabase
       .channel('admin-dashboard-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, () => {
-        void loadAllData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' }, () => {
-        void loadAllData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
-        void loadAllData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_photos' }, () => {
-        void loadAllData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_messages' }, () => {
-        void loadAllData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_presence' }, () => {
-        void loadAllData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'company_profile' }, () => {
-        void loadAllData()
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, triggerRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' }, triggerRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, triggerRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_photos' }, triggerRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_messages' }, triggerRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_presence' }, triggerRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'company_profile' }, triggerRefresh)
       .subscribe()
 
     return () => {
+      if (timeout) clearTimeout(timeout)
       void supabase.removeChannel(channel)
     }
   }, [session])
@@ -686,7 +719,24 @@ export default function AdminDashboardPage() {
   }
 
   if (loading) {
-    return <div style={{ padding: 24 }}>Loading admin dashboard...</div>
+    return <div style={{ padding: 24, color: '#111' }}>Loading admin dashboard...</div>
+  }
+
+  if (pageError) {
+    return (
+      <div style={{ padding: 24, color: '#111', fontFamily: 'Arial, sans-serif' }}>
+        <h2>Admin dashboard failed to load</h2>
+        <p>{pageError}</p>
+        <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+          <button onClick={() => window.location.reload()} style={primaryButtonStyle}>
+            Retry
+          </button>
+          <button onClick={() => (window.location.href = '/admin/login')} style={buttonStyle}>
+            Go to Login
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
